@@ -32,6 +32,7 @@ dependencies = [
  "libc",
  "log",
  "once_cell",
+ "serde_json",
  "tokio",
 ]
 

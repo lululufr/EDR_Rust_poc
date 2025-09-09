@@ -1,6 +1,7 @@
 //ADDING LOGIQUE ICI
 mod hooking;
 mod ebpf_state;
+mod config;
 
 use aya::maps::perf::PerfEventArray;
 use aya::programs::TracePoint;
@@ -15,6 +16,7 @@ use log::{debug, warn};
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use std::collections::HashSet;
 
 use agent_common::ExecEvent;
 
@@ -110,12 +112,28 @@ async fn main() -> anyhow::Result<()> {
             .take_map("BLOCKLIST")
             .ok_or_else(|| anyhow!("map BLOCKLIST not found"))?;
         let mut blocklist: aya::maps::HashMap<_, u32, u8> = aya::maps::HashMap::try_from(map)?;
-        // Exemple: bloque 1.1.1.1 dès le démarrage (ordre réseau)
-        let ip_be = u32::from_be_bytes([1, 1, 1, 1]);
-        let _ = blocklist.insert(ip_be, 1u8, 0);
+
+        // Charge les IPs interdites depuis le fichier JSON et les insère
+        let blocked_ips = crate::config::load_blocked_ips("config/blocked_ips.json")
+            .with_context(|| "chargement des IPs interdites")?;
+        for ip in &blocked_ips {
+            let key = u32::from_be_bytes(ip.octets());
+            let _ = blocklist.insert(key, 1u8, 0);
+        }
+        // Publie aussi la liste sous forme de chaînes pour la logique userland
+        let ip_strs: HashSet<String> = blocked_ips.into_iter().map(|ip| ip.to_string()).collect();
+        let _ = crate::ebpf_state::BLOCKED_IPS.set(ip_strs);
+
         crate::ebpf_state::BLOCKLIST
             .set(std::sync::Mutex::new(blocklist))
             .expect("BLOCKLIST déjà initialisé");
+    }
+
+    // Charge et publie la liste des commandes interdites
+    {
+        let cmds = crate::config::load_blocked_cmds("config/blocked_cmds.json")
+            .with_context(|| "chargement des commandes interdites")?;
+        let _ = crate::ebpf_state::BLOCKED_CMDS.set(cmds);
     }
 
     // ---- PerfEventArray setup (owned handle) ----
