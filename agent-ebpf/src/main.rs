@@ -4,9 +4,9 @@
 
 use aya_ebpf::{
     helpers::{bpf_get_current_comm, bpf_get_current_pid_tgid},
-    macros::{map, tracepoint, cgroup_sock_addr}, // + cgroup_sock_addr
-    maps::{perf::PerfEventArray, HashMap},        // + HashMap
-    programs::{TracePointContext, SockAddrContext}, // + SockAddrContext
+    macros::{map, tracepoint, cgroup_sock_addr},
+    maps::{perf::PerfEventArray, HashMap},
+    programs::{TracePointContext, SockAddrContext},
 };
 
 use agent_common::ExecEvent;
@@ -42,8 +42,7 @@ fn try_agent(ctx: TracePointContext) -> Result<u32, u32> {
     Ok(0)
 }
 
-// === BLOckk IP ===
-
+// === BLOCK IP ===
 
 #[map(name = "BLOCKLIST")]
 static mut BLOCKLIST: HashMap<u32, u8> = HashMap::with_max_entries(1024, 0);
@@ -52,12 +51,12 @@ static mut BLOCKLIST: HashMap<u32, u8> = HashMap::with_max_entries(1024, 0);
 pub fn block_connect4(ctx: SockAddrContext) -> i32 {
     match try_block_connect4(ctx) {
         Ok(v) => v,
-        Err(_) => 1, // fail-open: autorise si erreur
+        Err(_) => 1, // fail-open
     }
 }
 
 fn try_block_connect4(ctx: SockAddrContext) -> Result<i32, i64> {
-    // Adresse IPv4 de destination en ordre réseau (BE)
+    // IPv4 destination en ordre réseau (BE)
     let dst_be = unsafe { (*ctx.sock_addr).user_ip4 };
 
     // Si présente dans la blocklist -> deny (0), sinon allow (1)
@@ -65,14 +64,28 @@ fn try_block_connect4(ctx: SockAddrContext) -> Result<i32, i64> {
     Ok(if deny { 0 } else { 1 })
 }
 
+#[cgroup_sock_addr(sendmsg4)]
+pub fn block_sendmsg4(ctx: SockAddrContext) -> i32 {
+    match try_block_sendmsg4(ctx) {
+        Ok(v) => v,
+        Err(_) => 1,
+    }
+}
+
+fn try_block_sendmsg4(ctx: SockAddrContext) -> Result<i32, i64> {
+    let dst_be = unsafe { (*ctx.sock_addr).user_ip4 };
+    let deny = unsafe { BLOCKLIST.get(&dst_be).is_some() };
+    Ok(if deny { 0 } else { 1 })
+}
+
 // === FIN AJOUT ===
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = "license")]
+pub static LICENSE: [u8; 13] = *b"Dual MIT/GPL\0";
 
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}
 }
-
-#[unsafe(link_section = "license")]
-#[unsafe(no_mangle)]
-static LICENSE: [u8; 13] = *b"Dual MIT/GPL\0";

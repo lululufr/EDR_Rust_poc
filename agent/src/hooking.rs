@@ -4,7 +4,7 @@ use crate::hooking::read_ebpf::{read_cmdline, read_tcp, read_udp};
 mod read_ebpf;
 mod parse;
 
-use crate::hooking::edr::{catch_net};
+use crate::hooking::edr::catch_net;
 mod edr;
 
 pub fn handler_cmdline(ev:&ExecEvent){
@@ -32,10 +32,7 @@ pub fn handler_net(ev: &ExecEvent) {
     let comm = String::from_utf8_lossy(&ev.comm[..nul]).to_string();
 
     if let Some(tcp_entries) = read_tcp(ev.pid) {
-        
-        
-        catch_net(tcp_entries.clone());
-        
+        catch_net(tcp_entries.clone()).expect("Chaud ca a pas bloqué");
         println!(
             "\nEDR NET TCP: \n- pid={}\n- tgid={}\n- comm={}\n- connexions_tcp={:?}",
             ev.pid, ev.tgid, comm, tcp_entries
@@ -43,12 +40,9 @@ pub fn handler_net(ev: &ExecEvent) {
     }
 
     if let Some(udp_entries) = read_udp(ev.pid) {
-        
-        
         println!(
             "\nEDR NET UDP : \n- pid={}\n- tgid={}\n- comm={}\n- connexions_udp={:?}",
             ev.pid, ev.tgid, comm, udp_entries
         );
     }
 }
-

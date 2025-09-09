@@ -1,22 +1,43 @@
-
 //ADDING LOGIQUE ICI
 mod hooking;
+mod ebpf_state;
 
 use aya::maps::perf::PerfEventArray;
 use aya::programs::TracePoint;
+use aya::programs::CgroupSockAddr;
+use aya::programs::CgroupAttachMode;
 use aya::util::online_cpus;
 
 use anyhow::anyhow;
+use anyhow::Context;
 use bytes::BytesMut;
 use log::{debug, warn};
 
-use std::{time::Duration};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use agent_common::ExecEvent;
 
-
-
-
+fn current_cgroup_dir() -> anyhow::Result<PathBuf> {
+    let cg_root = Path::new("/sys/fs/cgroup");
+    if !cg_root.join("cgroup.controllers").exists() {
+        return Err(anyhow!("cgroup v2 non détecté: /sys/fs/cgroup/cgroup.controllers absent. Montez cgroup2 (ex: mount -t cgroup2 none /sys/fs/cgroup) et relancez."));
+    }
+    let data = std::fs::read_to_string("/proc/self/cgroup")
+        .with_context(|| "lecture de /proc/self/cgroup")?;
+    // Format v2: une seule ligne 0::/path
+    for line in data.lines() {
+        if let Some(pos) = line.find("::") {
+            let path = &line[pos + 2..];
+            let full = cg_root.join(path.trim_start_matches('/'));
+            if full.exists() {
+                return Ok(full);
+            }
+        }
+    }
+    // Fallback: racine
+    Ok(cg_root.to_path_buf())
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -38,43 +59,81 @@ async fn main() -> anyhow::Result<()> {
         "/agent"
     )))?;
 
-    // Optional: forward aya-log from kernel
-    match aya_log::EbpfLogger::init(&mut ebpf) {
-        Err(e) => warn!("failed to initialize eBPF logger: {e}"),
-        Ok(logger) => {
-            let mut logger =
-                tokio::io::unix::AsyncFd::with_interest(logger, tokio::io::Interest::READABLE)?;
-            tokio::task::spawn(async move {
-                loop {
-                    let mut guard = logger.readable_mut().await.unwrap();
-                    guard.get_inner_mut().flush();
-                    guard.clear_ready();
-                }
-            });
-        }
+    // Optional: forward aya-log from kernel (init puis drop immédiat)
+    if let Err(e) = aya_log::EbpfLogger::init(&mut ebpf) {
+        warn!("failed to initialize eBPF logger: {e}");
     }
 
     // Attach tracepoint sched:sched_process_exec (program is "agent" in ebpf crate).
-    let program: &mut TracePoint = ebpf.program_mut("agent").unwrap().try_into()?;
-    program.load()?;
-    program.attach("sched", "sched_process_exec")?;
+    {
+        let program: &mut TracePoint = ebpf.program_mut("agent").unwrap().try_into()?;
+        program.load()?;
+        program.attach("sched", "sched_process_exec")?;
+    }
+    // emrunts sur `ebpf` libérés ici
 
-    // ---- PerfEventArray setup (no threads) ----
-    let map = ebpf
-        .map_mut("EVENTS")
-        .ok_or_else(|| anyhow!("map EVENTS not found"))?;
-    let mut events: PerfEventArray<_> = PerfEventArray::try_from(map)?;
+    // Vérifie que cgroup v2 est monté
+    let cg_root = std::path::Path::new("/sys/fs/cgroup");
+    if !cg_root.join("cgroup.controllers").exists() {
+        return Err(anyhow!("cgroup v2 non détecté: /sys/fs/cgroup/cgroup.controllers absent. Montez cgroup2 (ex: mount -t cgroup2 none /sys/fs/cgroup) et relancez."));
+    }
 
-    // One perf buffer per CPU
-    let cpus = online_cpus().map_err(|e| anyhow!("online_cpus failed: {:?}", e))?;
-    let mut per_cpu_bufs = Vec::new(); // Vec<(cpu_id, perf_buf, pool)>
-    for cpu in cpus {
-        let perf_buf = events.open(cpu, None)?;
-        // Pool of BytesMut buffers for this perf reader
-        let pool = (0..64)
-            .map(|_| BytesMut::with_capacity(core::mem::size_of::<ExecEvent>()))
-            .collect::<Vec<_>>();
-        per_cpu_bufs.push((cpu, perf_buf, pool));
+    // Attache le programme cgroup_sock_addr(connect4) au cgroup racine
+    {
+        let prog: &mut CgroupSockAddr = ebpf
+            .program_mut("block_connect4")
+            .ok_or_else(|| anyhow!("program block_connect4 not found"))?
+            .try_into()?;
+        prog.load().with_context(|| "chargement du programme cgroup_sock_addr")?;
+        let cg_file = std::fs::File::open(cg_root)
+            .with_context(|| format!("ouverture du répertoire du cgroup {:?}", cg_root))?;
+        prog.attach(&cg_file, CgroupAttachMode::default())
+            .with_context(|| format!("attachement du programme cgroup_sock_addr(connect4) au cgroup {:?}", cg_root))?;
+    }
+
+    // Attache le programme cgroup_sock_addr(sendmsg4) au cgroup racine (UDP/DNS)
+    {
+        let prog: &mut CgroupSockAddr = ebpf
+            .program_mut("block_sendmsg4")
+            .ok_or_else(|| anyhow!("program block_sendmsg4 not found"))?
+            .try_into()?;
+        prog.load().with_context(|| "chargement du programme cgroup_sock_addr (sendmsg4)")?;
+        let cg_file = std::fs::File::open(cg_root)
+            .with_context(|| format!("ouverture du répertoire du cgroup {:?}", cg_root))?;
+        prog.attach(&cg_file, CgroupAttachMode::default())
+            .with_context(|| format!("attachement du programme cgroup_sock_addr(sendmsg4) au cgroup {:?}", cg_root))?;
+    }
+
+    // Expose global BLOCKLIST handle (owned via take_map)
+    {
+        let map = ebpf
+            .take_map("BLOCKLIST")
+            .ok_or_else(|| anyhow!("map BLOCKLIST not found"))?;
+        let mut blocklist: aya::maps::HashMap<_, u32, u8> = aya::maps::HashMap::try_from(map)?;
+        // Exemple: bloque 1.1.1.1 dès le démarrage (ordre réseau)
+        let ip_be = u32::from_be_bytes([1, 1, 1, 1]);
+        let _ = blocklist.insert(ip_be, 1u8, 0);
+        crate::ebpf_state::BLOCKLIST
+            .set(std::sync::Mutex::new(blocklist))
+            .expect("BLOCKLIST déjà initialisé");
+    }
+
+    // ---- PerfEventArray setup (owned handle) ----
+    let mut per_cpu_bufs = Vec::new();
+    {
+        let map = ebpf
+            .take_map("EVENTS")
+            .ok_or_else(|| anyhow!("map EVENTS not found"))?;
+        let mut events: PerfEventArray<_> = PerfEventArray::try_from(map)?;
+
+        let cpus = online_cpus().map_err(|e| anyhow!("online_cpus failed: {:?}", e))?;
+        for cpu in cpus {
+            let perf_buf = events.open(cpu, None)?;
+            let pool = (0..64)
+                .map(|_| BytesMut::with_capacity(core::mem::size_of::<ExecEvent>()))
+                .collect::<Vec<_>>();
+            per_cpu_bufs.push((cpu, perf_buf, pool));
+        }
     }
     // -------------------------------------------
 
@@ -106,28 +165,14 @@ async fn main() -> anyhow::Result<()> {
                             continue;
                         }
                         if b.len() >= core::mem::size_of::<ExecEvent>() {
-                            
                             // SAFETY: kernel wrote an ExecEvent payload
                             let ev: &ExecEvent = unsafe { &*(b.as_ptr() as *const ExecEvent) };
 
-
-
                             //LOGIQUE EDR !!!!!!!!!
-
-
                             hooking::handler_cmdline(ev);
                             hooking::handler_net(ev);
-
-
-
                             //LOGIQUE EDR !!!!!!!!! FIN
-                            
-                            
-
                         }
-                        
-                        
-                        
                         // Important: clear buffer for reuse
                         b.clear();
                     }
@@ -142,6 +187,6 @@ async fn main() -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_millis(5));
     }
 
-    println!("Exiting…");
+    println!("\n\nExiting…");
     Ok(())
 }
