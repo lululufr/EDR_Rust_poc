@@ -1,17 +1,17 @@
 #![no_std]
 #![no_main]
-#![allow(static_mut_refs)]  // <- add this for Rust 2024
+#![allow(static_mut_refs)]
 
 use aya_ebpf::{
     helpers::{bpf_get_current_comm, bpf_get_current_pid_tgid},
-    macros::{map, tracepoint},
-    maps::perf::PerfEventArray,
-    programs::TracePointContext,
+    macros::{map, tracepoint, cgroup_sock_addr}, // + cgroup_sock_addr
+    maps::{perf::PerfEventArray, HashMap},        // + HashMap
+    programs::{TracePointContext, SockAddrContext}, // + SockAddrContext
 };
-// use aya_log_ebpf::info; // optional
 
 use agent_common::ExecEvent;
 
+// === EXISTANT ===
 #[map(name = "EVENTS")]
 static mut EVENTS: PerfEventArray<ExecEvent> = PerfEventArray::new(0);
 
@@ -36,12 +36,36 @@ fn try_agent(ctx: TracePointContext) -> Result<u32, u32> {
     let ev = ExecEvent { pid, tgid, comm };
 
     unsafe {
-        // emit one record with this ExecEvent payload
         EVENTS.output(&ctx, &ev, 0);
     }
 
     Ok(0)
 }
+
+// === BLOckk IP ===
+
+
+#[map(name = "BLOCKLIST")]
+static mut BLOCKLIST: HashMap<u32, u8> = HashMap::with_max_entries(1024, 0);
+
+#[cgroup_sock_addr(connect4)]
+pub fn block_connect4(ctx: SockAddrContext) -> i32 {
+    match try_block_connect4(ctx) {
+        Ok(v) => v,
+        Err(_) => 1, // fail-open: autorise si erreur
+    }
+}
+
+fn try_block_connect4(ctx: SockAddrContext) -> Result<i32, i64> {
+    // Adresse IPv4 de destination en ordre réseau (BE)
+    let dst_be = unsafe { (*ctx.sock_addr).user_ip4 };
+
+    // Si présente dans la blocklist -> deny (0), sinon allow (1)
+    let deny = unsafe { BLOCKLIST.get(&dst_be).is_some() };
+    Ok(if deny { 0 } else { 1 })
+}
+
+// === FIN AJOUT ===
 
 #[cfg(not(test))]
 #[panic_handler]

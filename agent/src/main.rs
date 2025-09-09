@@ -10,25 +10,13 @@ use anyhow::anyhow;
 use bytes::BytesMut;
 use log::{debug, warn};
 
-use std::{fs, time::Duration};
+use std::{time::Duration};
 
 use agent_common::ExecEvent;
 
 
-fn read_cmdline(pid: u32) -> Option<Vec<String>> {
-    let path = format!("/proc/{}/cmdline", pid);
-    let bytes = fs::read(path).ok()?;
-    if bytes.is_empty() {
-        return None;
-    }
-    Some(
-        bytes
-            .split(|b| *b == 0)
-            .filter(|s| !s.is_empty())
-            .map(|s| String::from_utf8_lossy(s).into_owned())
-            .collect(),
-    )
-}
+
+
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -127,7 +115,9 @@ async fn main() -> anyhow::Result<()> {
                             //LOGIQUE EDR !!!!!!!!!
 
 
-                            hooking::handler(ev);
+                            hooking::handler_cmdline(ev);
+                            hooking::handler_net(ev);
+
 
 
                             //LOGIQUE EDR !!!!!!!!! FIN
