@@ -1,0 +1,6 @@
+streamlit==1.37.1
+pandas>=2.1
+plotly>=5.24
+orjson>=3.10    # optional, speeds up Plotly in Streamlit
+fastapi
+uvicorn

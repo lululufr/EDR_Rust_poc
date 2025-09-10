@@ -8,6 +8,9 @@ mod parse;
 use crate::hooking::edr::catch_net;
 mod edr;
 
+use crate::hooking::send_alert::send_alert_to_central;
+mod send_alert;
+
 pub fn handler_cmdline(ev:&ExecEvent){
 
     let nul = ev
@@ -19,17 +22,27 @@ pub fn handler_cmdline(ev:&ExecEvent){
     let argv = read_cmdline(ev.pid).unwrap_or_default();
 
     // Blocage par nom de binaire via config (config/blocked_cmds.json)
-    let argv0_basename = argv
+    let argv0_basename: String = argv
         .get(0)
-        .map(|s| s.rsplit('/').next().unwrap_or(s.as_str()))
-        .unwrap_or("");
+        .map(|s| s.rsplit('/').next().unwrap_or(s.as_str()).to_owned())
+        .unwrap_or_else(|| "<unknown>".to_string());
     let is_banned = crate::ebpf_state::BLOCKED_CMDS
         .get()
-        .map(|set| set.contains(&comm) || set.contains(argv0_basename))
+        .map(|set| set.contains(&comm) || set.contains(&argv0_basename))
         .unwrap_or(false);
     if is_banned {
-        unsafe { let _ = libc::kill(ev.tgid as i32, libc::SIGKILL); }
+        // Envoie de l'alert vers le centrale (J'utilise tokio pour faire un appel asynchrone pour éviter de bloquer le thread principal)
+        let tgid: u32 = ev.tgid;
+        tokio::spawn({
         println!("EDR CMD BLOQUÉ: {} (pid={})", argv0_basename, ev.tgid);
+        let alert: String = argv0_basename; // move the String
+        async move {
+            if let Err(e) = send_alert_to_central(&alert, tgid).await {
+                eprintln!("send_alert_to_central failed: {e}");
+                }
+            }
+        });
+        unsafe { let _ = libc::kill(ev.tgid as i32, libc::SIGKILL); }
         return;
     }
 
