@@ -1,0 +1,7 @@
+[theme]
+base = "dark"
+primaryColor = "#8BE9FD"                 # cyan accents
+backgroundColor = "#0F1226"              # deep indigo canvas
+secondaryBackgroundColor = "#171A31"     # card panels
+textColor = "#E6E8FF"
+font = "monospace"

@@ -129,6 +129,13 @@ async fn main() -> anyhow::Result<()> {
             .expect("BLOCKLIST déjà initialisé");
     }
 
+    // Charge les paramètres généraux
+    {
+    let general_settings = crate::config::load_general_settings("config/general.json")
+        .with_context(|| "Chargement des paramètres généraux")?;
+    let _ = crate::ebpf_state::GENERAL_SETTINGS.set(general_settings);
+    }
+
     // Charge et publie la liste des commandes interdites
     {
         let cmds = crate::config::load_blocked_cmds("config/blocked_cmds.json")
@@ -156,7 +163,6 @@ async fn main() -> anyhow::Result<()> {
     // -------------------------------------------
 
     println!("EDR lancé !");
-
     // Cooperative shutdown: a Ctrl-C task toggles this flag.
     use std::sync::{
         atomic::{AtomicBool, Ordering},

@@ -1,5 +1,6 @@
 use aya::Ebpf;
 use once_cell::sync::OnceCell;
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 pub static EBPF: OnceCell<Mutex<Ebpf>> = OnceCell::new();
@@ -11,6 +12,9 @@ pub static BLOCKLIST: OnceCell<Mutex<AyaHashMap<MapData, u32, u8>>> = OnceCell::
 // Nouvelles commandes bloquées (lecture seule après init)
 use std::collections::HashSet;
 pub static BLOCKED_CMDS: OnceCell<HashSet<String>> = OnceCell::new();
+
+// Paramètres généraux (lecture seule après init)
+pub static GENERAL_SETTINGS: OnceCell<HashMap<String, String>> = OnceCell::new();
 
 // Nouvelles IPs bloquées (lecture seule après init)
 pub static BLOCKED_IPS: OnceCell<HashSet<String>> = OnceCell::new();

@@ -1,0 +1,15 @@
+version: "3.9"
+services:
+  alerts:
+    build: .
+    container_name: st-alerts
+    ports:
+      - "8501:8501"
+      - "8000:8000"
+    environment:
+      DB_PATH: /data/alerts.db
+    volumes:
+      - ./data:/data                         # persist SQLite
+      - ./app.py:/app/app.py:ro              # edit locally, refresh on save
+      - ./.streamlit:/app/.streamlit:ro
+    restart: unless-stopped
